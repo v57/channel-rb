@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+bundle install --path vendor/bundle >/dev/null
+
+ruby -rsocket -e "begin; Socket.tcp('127.0.0.1', 2049, connect_timeout: 1) { |s| s.close }; rescue => e; warn 'TypeScript server is required on 127.0.0.1:2049'; exit 1; end"
+
+bundle exec ruby -Ilib test/run_unit.rb
+bundle exec ruby -Ilib test/run_ts.rb
+bundle exec ruby -Ilib test/run_ruby.rb

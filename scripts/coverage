@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+bundle install --path vendor/bundle >/dev/null
+
+mkdir -p coverage
+rm -f coverage/lcov.info
+
+COVERAGE=1 SIMPLECOV_COMMAND_NAME=unit bundle exec ruby -Ilib test/run_unit.rb
+COVERAGE=1 SIMPLECOV_COMMAND_NAME=ts bundle exec ruby -Ilib test/run_ts.rb
+COVERAGE=1 SIMPLECOV_COMMAND_NAME=ruby bundle exec ruby -Ilib test/run_ruby.rb
+
+if [[ ! -s coverage/lcov.info ]]; then
+  echo "coverage/lcov.info was not generated"
+  exit 1
+fi
+
+echo "LCOV written to $ROOT/coverage/lcov.info"

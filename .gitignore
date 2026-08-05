@@ -1,0 +1,12 @@
+# Bundler
+.bundle/
+vendor/bundle/
+
+# Test and coverage output
+coverage/
+
+# Benchmark output
+/benchmark.json
+
+# macOS
+.DS_Store
