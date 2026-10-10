@@ -29,6 +29,32 @@ class ChannelCoreTest < Minitest::Test
     assert_includes(responses, { id: 2, done: true })
   end
 
+  def test_merge_keeps_post_other_and_stream_other_under_prefix
+    match = proc { |path| path.start_with?('dyn/') }
+    inner = ChannelRB::Channel.new
+    inner.post_other(match, proc { |body| "post:#{body[:body]}" })
+    inner.stream_other(proc { |path| path == 'feed' }, proc { [1].each })
+    outer = ChannelRB::Channel.new.merge(inner, 'm')
+
+    assert_equal(1, outer.other_post_api.length)
+    assert(outer.other_post_api[0][:path].call('m/dyn/x'))
+    refute(outer.other_post_api[0][:path].call('dyn/x'))
+    assert(outer.other_stream_api[0][:path].call('m/feed'))
+
+    responses = []
+    controller = fake_controller(fake_sender, responses)
+    outer.receive_one({ id: 1, path: 'm/dyn/x', body: 'a' }, controller)
+    outer.receive_one({ id: 2, path: 'dyn/x', body: 'a' }, controller)
+    sleep 0.05
+
+    assert_includes(responses, { id: 1, body: 'post:a' })
+    refute_includes(responses, { id: 2, body: 'post:a' })
+
+    # Without a prefix the matchers are reused as-is
+    flat = ChannelRB::Channel.new.merge(inner)
+    assert_same(match, flat.other_post_api[0][:path])
+  end
+
   def test_disconnect_runs_cleanup_callbacks_and_clears_pending_maps
     disconnected = 0
     channel = ChannelRB::Channel.new.on_disconnect(proc {

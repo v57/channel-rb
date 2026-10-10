@@ -183,6 +183,11 @@ module ChannelRB
       other_channel.stream_api.each do |key, value|
         stream("#{p}#{key}", value)
       end
+      scoped = lambda do |match|
+        p.empty? ? match : ->(path) { path.start_with?(p) && match.call(path[p.length..]) }
+      end
+      other_channel.other_post_api.each { |item| post_other(scoped.call(item[:path]), item[:request]) }
+      other_channel.other_stream_api.each { |item| stream_other(scoped.call(item[:path]), item[:request]) }
       self
     end
 
