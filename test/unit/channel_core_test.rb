@@ -111,7 +111,8 @@ class ChannelCoreTest < Minitest::Test
     sender.stream_each { |_id, stream| stream.kill if stream.alive? }
   end
 
-  def test_subscription_body_replaces_topic_formatter_for_ts_parity
+  def test_subscription_body_sets_body_formatter_not_topic
+    # TS 6d42247: body() sets the body formatter; topic() keeps formatting the topic.
     subscription = ChannelRB::Subscription.new
     events = []
     subscription.publishers << ChannelRB::Publisher.new { |event| events << event }
@@ -119,8 +120,45 @@ class ChannelCoreTest < Minitest::Test
     subscription.topic { |body| "topic-#{body}" }
     subscription.body { |body| "body-#{body}" }
     subscription.send_event('x', 'payload')
+    subscription.send_event('y')
 
-    assert_equal([{ topic: 'body-x', body: 'payload' }], events)
+    assert_equal([{ topic: 'topic-x', body: 'payload' }, { topic: 'topic-y', body: 'body-y' }], events)
+  end
+
+  def test_subscription_publish_drops_only_js_falsy_bodies
+    # TS: `if (!body) return` drops undefined/null/false/0/NaN/""; keeps [], {}, "0".
+    subscription = ChannelRB::Subscription.new
+    bodies = []
+    subscription.publishers << ChannelRB::Publisher.new { |event| bodies << event[:body] }
+
+    [nil, false, 0, 0.0, Float::NAN, '', [], {}, '0', true, 1, 'a'].each do |body|
+      subscription.publish('t', body)
+    end
+
+    assert_equal([[], {}, '0', true, 1, 'a'], bodies)
+  end
+
+  def test_requests_on_the_wire_do_not_carry_the_sender
+    channel = ChannelRB::Channel.new
+    request = channel.make_request('p', 1, nil, proc {}, Object.new)
+    refute(request.key?(:sender))
+    refute_includes(ChannelRB::JSONCodec.dump(request), 'sender')
+  end
+
+  def test_disconnect_fails_pending_requests_of_that_sender
+    channel = ChannelRB::Channel.new
+    sender = Object.new
+    def sender.stream_each; end
+    def sender.request_each; end
+    def sender.stream_clear; end
+    def sender.request_clear; end
+    responses = []
+    channel.make_request('p', nil, nil, proc { |response| responses << response }, sender)
+    channel.make_request('q', nil, nil, proc { |response| responses << response }, Object.new)
+
+    channel.disconnect({}, sender)
+
+    assert_equal([{ id: 0, error: 'disconnected' }], responses)
   end
 
   def test_process_stop_clears_pending_requests

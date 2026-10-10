@@ -227,10 +227,16 @@ class CoverageBranchesTest < Minitest::Test
     )
 
     headers = protocol.send(:extract_headers, env)
-    assert_equal('abc', headers['X-Token'])
-    assert_equal('en', headers['Accept-Language'])
+    assert_equal('abc', headers['x-token'])
+    assert_equal('en', headers['accept-language'])
     assert_equal('tester', headers['name'])
     assert_equal('admin', headers['role'])
+    assert_nil(headers['X-Token'])
+
+    # Real headers win over query parameters (AUDIT §3.3).
+    spoofed = protocol.send(:extract_headers, env.merge('QUERY_STRING' => 'x-token=evil&role=admin'))
+    assert_equal('abc', spoofed['x-token'])
+    assert_equal('admin', spoofed['role'])
 
     client = DummyClient.new
     protocol.on_open(client)
@@ -403,16 +409,12 @@ class CoverageBranchesTest < Minitest::Test
     assert_equal('ws://host:1', ws.__send__(:normalize_address, 'host:1'))
     assert_equal('wss://secure', ws.__send__(:normalize_address, 'wss://secure'))
 
-    ws.instance_variable_set(:@address, 'ws://localhost:9000/path')
-    ws.instance_variable_set(:@headers_provider, proc { { token: 'abc', empty: '' } })
-    decorated = ws.__send__(:decorated_url)
-    assert_includes(decorated, 'token=abc')
+    # Headers are sent as real handshake headers, never moved into the URL (AUDIT §3.4).
+    ws.instance_variable_set(:@headers_provider, proc { { token: 'abc', empty: '', n: 1 } })
+    assert_equal({ 'token' => 'abc', 'n' => '1' }, ws.__send__(:resolve_headers))
 
     ws.instance_variable_set(:@headers_provider, proc { nil })
-    assert_equal('ws://localhost:9000/path', ws.__send__(:decorated_url))
-
-    ws.instance_variable_set(:@headers_provider, proc { raise 'bad headers' })
-    assert_equal('ws://localhost:9000/path', ws.__send__(:decorated_url))
+    assert_equal({}, ws.__send__(:resolve_headers))
 
     bad_close = Object.new
     def bad_close.close
@@ -448,6 +450,7 @@ class CoverageBranchesTest < Minitest::Test
     parsed = []
     ws.on_message = proc { |message| parsed << message }
     ws.handle_message('{')
+    assert_match(/invalid message from server/, ws.close_error)
     ws.handle_message('{"ok":1}')
     assert_equal([{ 'ok' => 1 }], parsed)
 

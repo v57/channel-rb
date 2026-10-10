@@ -35,6 +35,35 @@ class RubyServerIntegrationTest < Minitest::Test
     end
   end
 
+  def test_client_headers_reach_server_as_lowercased_headers_that_win_over_query
+    client = ChannelRB::Channel.new.connect(
+      "ws://127.0.0.1:#{@@port}/?x-user=admin&q=1",
+      headers: proc { { 'X-User' => 'alice' } }
+    )
+    wait_for_connection(client)
+    assert_equal('world', with_timeout { client.send('hello') })
+    headers = @@stats[:headers]
+    assert_equal('alice', headers['x-user'])
+    assert_equal('1', headers['q'])
+    assert_nil(headers['X-User'])
+  ensure
+    client&.stop
+  end
+
+  def test_server_accepts_messages_over_iodine_default_limit
+    with_simple_client do |client|
+      size = 2 * 1024 * 1024
+      assert_equal(size, with_timeout { client.send('length', 'a' * size) })
+    end
+  end
+
+  def test_connection_dropped_before_reply_fails_the_call
+    with_simple_client do |client|
+      error = assert_raises(ChannelRB::ChannelError) { with_timeout(3) { client.send('drop') } }
+      assert_equal('disconnected', error.message)
+    end
+  end
+
   def test_post_not_found
     with_simple_client do |client|
       error = assert_raises(ChannelRB::ChannelError) { with_timeout { client.send('notfound') } }
@@ -160,6 +189,12 @@ class RubyServerIntegrationTest < Minitest::Test
     server_channel.post('mirror', proc { |body| body[:sender].send('hello') })
     server_channel.post('echo', proc { |body| body[:body] })
     server_channel.post('empty', proc { nil })
+    server_channel.post('length', proc { |body| body[:body].length })
+    server_channel.post('drop', proc { |body|
+      body[:sender].stop
+      sleep 0.2 # reply after the connection is gone
+      'too late'
+    })
     server_channel.post('disconnect', proc { |body|
       body[:sender].stop
       nil
@@ -213,7 +248,13 @@ class RubyServerIntegrationTest < Minitest::Test
     server_channel.events(@@events)
 
     @@port = find_free_port
-    @@server = server_channel.listen("127.0.0.1:#{@@port}")
+    @@server = server_channel.listen(
+      "127.0.0.1:#{@@port}",
+      state: proc { |headers|
+        @@stats[:headers] = headers
+        {}
+      }
+    )
     wait_for_port('127.0.0.1', @@port)
     @@booted = true
   end

@@ -47,6 +47,9 @@ module ChannelRB
 
   class WebSocketClientConnection
     attr_writer :on_open, :on_close, :on_message
+    # For the connection attempt that just ended (read from on_close): whether it got past the
+    # handshake, and why it failed (nil for a plain close or an unreachable address).
+    attr_reader :was_open, :close_error
 
     def initialize(address, headers_provider = nil)
       @address = normalize_address(address)
@@ -73,6 +76,9 @@ module ChannelRB
       @on_close = nil
       @on_message = nil
 
+      @was_open = false
+      @close_error = nil
+
       start
     end
 
@@ -86,7 +92,20 @@ module ChannelRB
       return unless should_start
 
       IodineRuntime.ensure_started
-      Iodine.connect(url: decorated_url, handler: ClientConnectionHandler.new(self), ping: 40)
+      @was_open = false
+      @close_error = nil
+      # Headers go in the real WebSocket handshake. (TS only moves them into the query string in
+      # browsers, which can't set WebSocket headers; query strings end up in proxy/access logs.)
+      args = { url: @address, handler: ClientConnectionHandler.new(self), ping: 40 }
+      begin
+        headers = resolve_headers
+      rescue StandardError
+        # Never connect without the caller's (auth) headers: retry like a failed connect.
+        schedule_reconnect
+        return
+      end
+      args[:headers] = headers unless headers.empty?
+      Iodine.connect(**args)
     ensure
       @state_mutex.synchronize { @starting = false }
     end
@@ -191,6 +210,18 @@ module ChannelRB
       end
     end
 
+    def running?
+      @state_mutex.synchronize { @running }
+    end
+
+    # Forget queued requests whose ids are no longer pending in the channel (they were failed),
+    # so they aren't re-sent on reconnect.
+    def drop_pending
+      @pending_mutex.synchronize do
+        @pending.delete_if { |_id, body| body.is_a?(Hash) && yield(body) }
+      end
+    end
+
     def handle_open(connection)
       pending = nil
 
@@ -198,6 +229,7 @@ module ChannelRB
         @connection = connection
         @connected = true
       end
+      @was_open = true
 
       @pending_mutex.synchronize do
         pending = @pending.values.dup
@@ -217,10 +249,20 @@ module ChannelRB
     end
 
     def handle_message(message)
-      parsed = JSONCodec.load(message)
-      @on_message.call(parsed) if @on_message
-    rescue StandardError
-      # Malformed JSON should not crash client callbacks.
+      begin
+        parsed = JSONCodec.load(message)
+      rescue StandardError, SystemStackError => e
+        # Same as TS: a peer that sends invalid JSON gets disconnected; pending calls fail
+        # with this error (see Channel#connect's on_close) instead of waiting forever.
+        @close_error = "invalid message from server: #{e.message}"
+        connected_connection&.close
+        return
+      end
+      begin
+        @on_message.call(parsed) if @on_message
+      rescue StandardError
+        # A failing handler must not take the connection down.
+      end
     end
 
     def handle_close
@@ -239,13 +281,7 @@ module ChannelRB
 
       return unless should_reconnect
 
-      Thread.new do
-        sleep 0.1
-        begin
-          start
-        rescue StandardError
-        end
-      end
+      schedule_reconnect
     end
 
     private
@@ -257,23 +293,27 @@ module ChannelRB
       "ws://#{address}"
     end
 
-    def decorated_url
-      return @address unless @headers_provider
+    def schedule_reconnect
+      Thread.new do
+        sleep 0.1
+        begin
+          start
+        rescue StandardError
+        end
+      end
+    end
+
+    def resolve_headers
+      return {} unless @headers_provider
 
       headers = @headers_provider.call
-      return @address unless headers.is_a?(Hash) && !headers.empty?
+      return {} unless headers.is_a?(Hash)
 
-      uri = URI.parse(@address)
-      params = URI.decode_www_form(uri.query.to_s)
-      headers.each do |key, value|
+      headers.each_with_object({}) do |(key, value), result|
         next if value.nil? || value.to_s.empty?
 
-        params << [key.to_s, value.to_s]
+        result[key.to_s] = value.to_s
       end
-      uri.query = URI.encode_www_form(params)
-      uri.to_s
-    rescue StandardError
-      @address
     end
 
     def enqueue_payload(payload)
@@ -375,8 +415,17 @@ module ChannelRB
       end
 
       ws.on_close = proc do
-        cleanup_publishers.call
+        if !ws.running?
+          cleanup_publishers.call
+        elsif !ws.was_open && ws.close_error.nil?
+          # Address not reachable yet: keep pending requests, they are re-sent on connect.
+          next
+        end
+        fail_requests(sender, ws.close_error) unless ws.close_error.nil?
+        # Settles whatever is left with "disconnected" so no caller waits forever
+        # (e.g. a reply over the client's message size limit closes the connection).
         disconnect(state, sender)
+        ws.drop_pending { |body| !body[:id].nil? && request_get(body[:id]).nil? }
       end
 
       ws.on_message = proc do |message|

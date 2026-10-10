@@ -74,36 +74,52 @@ module ChannelRB
         end
       end
 
-      to_delete = []
-      request_each do |id, request|
-        to_delete << id if request.request[:sender] == sender
-      end
-      to_delete.each { |id| cancel(id) }
+      fail_requests(sender, 'disconnected')
 
       sender.stream_clear
       sender.request_clear
     end
 
+    # Settles every pending outgoing request made through `sender` with `error`.
+    # (TS silently drops them on disconnect, which strands the caller forever.)
+    def fail_requests(sender, error)
+      failed = []
+      request_each do |id, request|
+        failed << [id, request] if request.request[:sender].equal?(sender)
+      end
+      failed.each do |id, request|
+        request_delete(id)
+        begin
+          request.response.call(id: id, error: error)
+        rescue StandardError
+        end
+      end
+      failed.map(&:first)
+    end
+
     def make_request(path, body, context, response, sender = nil)
       id = next_id
-      request = { id: id, path: path, body: body, context: context, sender: sender }
-      pending = PendingRequest.new(request, response)
+      request = { id: id, path: path, body: body, context: context }
+      # The sender stays local: it must not be serialized onto the wire.
+      pending = PendingRequest.new(request.merge(sender: sender), response)
       request_set(id, pending)
       request
     end
 
     def make_stream(stream, body, context, response, sender = nil)
       id = next_id
-      request = { id: id, stream: stream, body: body, context: context, sender: sender }
-      pending = PendingRequest.new(request, response)
+      request = { id: id, stream: stream, body: body, context: context }
+      # The sender stays local: it must not be serialized onto the wire.
+      pending = PendingRequest.new(request.merge(sender: sender), response)
       request_set(id, pending)
       request
     end
 
     def make_subscription(sub, body, context, response, sender = nil)
       id = next_id
-      request = { id: id, sub: sub, body: body, context: context, sender: sender }
-      pending = PendingRequest.new(request, response)
+      request = { id: id, sub: sub, body: body, context: context }
+      # The sender stays local: it must not be serialized onto the wire.
+      pending = PendingRequest.new(request.merge(sender: sender), response)
       request_set(id, pending)
       request
     end

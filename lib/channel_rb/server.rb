@@ -7,6 +7,9 @@ require_relative 'json'
 require_relative 'sender'
 
 module ChannelRB
+  # Largest WebSocket message accepted by the server: 16 MiB, the TS/Bun default.
+  DEFAULT_MAX_PAYLOAD = 16 * 1024 * 1024 unless const_defined?(:DEFAULT_MAX_PAYLOAD)
+
   class TopicSubscriptions
     def initialize
       @id = 0
@@ -225,20 +228,28 @@ module ChannelRB
 
     private
 
+    # Query parameters first, then real HTTP headers, so headers win (TS parity: an
+    # authenticating proxy's header can't be overridden with `?x-user-id=...`).
+    # Header names are lowercased like TS/Bun (`authorization`, `x-user-id`).
     def extract_headers(env)
       headers = {}
-      env.each do |key, value|
-        next unless key.start_with?('HTTP_')
-
-        name = key.sub('HTTP_', '').split('_').map(&:capitalize).join('-')
-        headers[name] = value
-      end
 
       query = env['QUERY_STRING'].to_s
       unless query.empty?
-        URI.decode_www_form(query).each do |key, value|
-          headers[key] = value
+        begin
+          URI.decode_www_form(query).each do |key, value|
+            headers[key] = value
+          end
+        rescue ArgumentError
+          # Malformed query string: ignore it rather than failing the handshake.
         end
+      end
+
+      env.each do |key, value|
+        # HTTP_VERSION is the request line's protocol (Rack/CGI), not a header.
+        next unless key.start_with?('HTTP_') && key != 'HTTP_VERSION'
+
+        headers[key.sub('HTTP_', '').downcase.tr('_', '-')] = value
       end
 
       headers
@@ -260,7 +271,11 @@ module ChannelRB
         end
       end
 
-      Iodine.listen(service: :http, address: host, port: port, handler: app)
+      # max_msg is in KiB: accept WebSocket messages up to 16 MiB (TS/Bun default) instead of
+      # iodine's ~250 KiB default. `max_payload:` (bytes) overrides it.
+      max_payload = options[:max_payload] || DEFAULT_MAX_PAYLOAD
+      Iodine.listen(service: :http, address: host, port: port, handler: app,
+                    max_msg: (max_payload + 1023) / 1024)
 
       publisher = Publisher.new do |event|
         registry.each { |connection| connection.publish_event(event) }
