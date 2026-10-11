@@ -10,6 +10,11 @@ Powerful and lightweight communication built for modern language. Ruby implement
 bundle install --path vendor/bundle
 ```
 
+# Dependencies
+
+Two gems, for speed: [`oj`](https://rubygems.org/gems/oj) (JSON) and [`iodine`](https://rubygems.org/gems/iodine)
+(WebSocket client and server, a C extension). `minitest` and `simplecov` are for the tests only.
+
 # Usage
 
 ```ruby
