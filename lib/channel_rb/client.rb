@@ -51,6 +51,12 @@ module ChannelRB
     # handshake, and why it failed (nil for a plain close or an unreachable address).
     attr_reader :was_open, :close_error
 
+    # Seconds before reconnect attempt `attempt` (0 = first retry): 100 ms doubling up to 5 s, scaled to
+    # 50-100% by `jitter` (0..1) so clients don't retry in lockstep. Same numbers as the TypeScript client.
+    def self.reconnect_delay(attempt, jitter)
+      [5.0, 0.1 * (2**[attempt, 16].min)].min * (0.5 + jitter / 2.0)
+    end
+
     def initialize(address, headers_provider = nil)
       @address = normalize_address(address)
       @headers_provider = headers_provider
@@ -78,6 +84,7 @@ module ChannelRB
 
       @was_open = false
       @close_error = nil
+      @attempts = 0
 
       start
     end
@@ -230,6 +237,7 @@ module ChannelRB
         @connected = true
       end
       @was_open = true
+      @attempts = 0
 
       @pending_mutex.synchronize do
         pending = @pending.values.dup
@@ -294,8 +302,10 @@ module ChannelRB
     end
 
     def schedule_reconnect
+      delay = self.class.reconnect_delay(@attempts, rand)
+      @attempts += 1
       Thread.new do
-        sleep 0.1
+        sleep delay
         begin
           start
         rescue StandardError
