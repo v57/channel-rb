@@ -55,6 +55,9 @@ class CoverageBranchesTest < Minitest::Test
   end
 
   def setup
+    # Stop a server an earlier test left running: clearing @started alone would hide it from the
+    # at_exit stop, and Iodine would keep the process alive.
+    ChannelRB::IodineRuntime.stop
     ChannelRB::IodineRuntime.instance_variable_set(:@started, false)
     ChannelRB::IodineRuntime.instance_variable_set(:@thread, nil)
   end
